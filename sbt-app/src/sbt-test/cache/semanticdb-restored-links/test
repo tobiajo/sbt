@@ -1,0 +1,29 @@
+# A cache hit restores the SemanticDB files as links into the disk cache, whose blobs are
+# read-only. A later compile that misses the cache must replace them instead of writing through.
+# On APFS the store restores copies, so only other file systems exercise the fix.
+
+# a source edit after a cache hit
+> compile
+$ delete target/out
+> compile
+> checkHit
+$ copy-file changes/A.scala src/main/scala/A.scala
+> compile
+> checkSemanticdb changed
+
+# a configuration that inherits Compile's options writes into Compile's target root
+$ delete target/out
+> compile
+> checkHit
+> Custom/compile
+> checkSemanticdb
+
+# Scala 2 and an options change, as in #9877
+> set ThisBuild / scalaVersion := "2.13.16"
+> compile
+$ delete target/out
+> compile
+> checkHit
+> set ThisBuild / scalacOptions += "-deprecation"
+> compile
+> checkSemanticdb

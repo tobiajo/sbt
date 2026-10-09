@@ -11,7 +11,9 @@ package internal
 
 import java.io.{ File, PrintWriter }
 import java.nio.file.{ Files, Path, Paths, StandardCopyOption }
+import java.nio.file.attribute.BasicFileAttributes
 import java.util.{ ArrayList, Optional }
+import java.util.function.BiPredicate
 import sbt.BuildExtra.*
 import sbt.Keys.Classpath
 import sbt.internal.CommandStrings
@@ -21,6 +23,7 @@ import sbt.internal.worker.{ ClientJobParams, ScalaInstanceConfig }
 import sbt.internal.worker1.{ ConsoleInfo, WorkerMain }
 import sbt.internal.util.{ Attributed, RunHandler, Terminal as ITerminal }
 import sbt.io.IO
+import sbt.plugins.SemanticdbPlugin
 import sbt.protocol.Serialization
 import sbt.librarymanagement.{
   Artifact,
@@ -34,11 +37,11 @@ import sbt.librarymanagement.{
   SemanticSelector,
   VersionNumber
 }
-import sbt.util.Logger
+import sbt.util.{ ActionCache, Logger }
 import scala.jdk.CollectionConverters.*
 import scala.jdk.OptionConverters.*
 import scala.util.{ Random, Using }
-import xsbti.{ HashedVirtualFileRef, ScalaProvider }
+import xsbti.{ FileConverter, HashedVirtualFileRef, ScalaProvider, VirtualFileRef }
 import xsbti.compile.{ CompileAnalysis, Inputs, PreviousResult }
 
 object Compiler:
@@ -700,6 +703,40 @@ object Compiler:
       links.foreach(Files.deleteIfExists)
       if links.nonEmpty then
         log.debug(s"dropped ${links.size} restored class files under $classesDir")
+
+  /**
+   * Replaces the SemanticDB files a cache hit restored as links into the read-only CAS with
+   * writable copies before scalac rewrites them, under the class directory and the target roots the
+   * compile's own options name. Only roots restored by a linking store, whose dirzip is a link, are
+   * walked. See `cache/semanticdb-restored-links`.
+   */
+  private[sbt] def prepareSemanticdbOutput(ci: Inputs, conv: FileConverter, log: Logger): Unit =
+    val targetRoots = SemanticdbPlugin
+      .targetRoots(ci.options.scalacOptions.toSeq)
+      .map(root => conv.toPath(VirtualFileRef.of(root)))
+    (ci.options.classesDirectory +: targetRoots).distinct
+      .filter(root => Files.isSymbolicLink(ActionCache.dirZipPath(root)))
+      .map(_.resolve("META-INF").resolve("semanticdb"))
+      .filter(Files.isDirectory(_))
+      .foreach: dir =>
+        val links =
+          Using.resource(Files.find(dir, Int.MaxValue, isFileLink))(_.iterator.asScala.toList)
+        links
+          .foreach(p => if dangles(p) then Files.deleteIfExists(p) else replaceWithWritableCopy(p))
+        if links.nonEmpty then
+          log.debug(s"replaced ${links.size} restored SemanticDB links under $dir")
+
+  private val isFileLink: BiPredicate[Path, BasicFileAttributes] = (p, a) =>
+    a.isSymbolicLink && !Files.isDirectory(p)
+
+  private def replaceWithWritableCopy(link: Path): Unit =
+    val target = link.toRealPath()
+    val tmp = Files.createTempFile(link.getParent, link.getFileName.toString, ".tmp")
+    try
+      Files.copy(target, tmp, StandardCopyOption.REPLACE_EXISTING)
+      tmp.toFile.setWritable(true)
+      Files.move(tmp, link, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+    finally Files.deleteIfExists(tmp)
 
   /**
    * Gets the early output into a state Zinc can update incrementally.
