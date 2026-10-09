@@ -99,16 +99,6 @@ object SemanticdbPlugin extends AutoPlugin:
     if ScalaInstance.isDotty(scalaVersion) then Seq("-semanticdb-target", targetRoot.toString)
     else Seq(s"-P:semanticdb:targetroot:$targetRoot")
 
-  /** The target roots that scalac options name, the inverse of [[targetRootOptions]]. */
-  private[sbt] def targetRoots(scalacOptions: Seq[String]): Seq[String] =
-    def roots(opts: List[String]): List[String] = opts match
-      case s"-P:semanticdb:targetroot:$dir" :: rest => dir :: roots(rest)
-      case s"-semanticdb-target:$dir" :: rest       => dir :: roots(rest)
-      case "-semanticdb-target" :: dir :: rest      => dir :: roots(rest)
-      case _ :: rest                                => roots(rest)
-      case Nil                                      => Nil
-    roots(scalacOptions.toList)
-
   private val compileIncAndCacheSemanticdbTargetRootTask = Def.cachedTask {
     val prev = compileIncremental.value
     val vfTargetRoot = semanticdbTargetRootVF.value

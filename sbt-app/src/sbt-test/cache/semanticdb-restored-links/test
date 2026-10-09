@@ -1,6 +1,6 @@
-# A cache hit restores the SemanticDB files as links into the disk cache, whose blobs are
-# read-only. A later compile that misses the cache must replace them instead of writing through.
-# On APFS the store restores copies, so only other file systems exercise the fix.
+# A cache hit must restore the SemanticDB files as writable copies, not as links into the
+# read-only disk cache, so that a later compile that misses the cache can rewrite them.
+# On APFS the store restores copies anyway, so only other file systems exercise the fix.
 
 # a source edit after a cache hit
 > compile
@@ -17,6 +17,17 @@ $ delete target/out
 > checkHit
 > Custom/compile
 > checkSemanticdb
+
+# with semanticdbIncludeInJar the SemanticDB files are restored with the class directory
+> set ThisBuild / semanticdbIncludeInJar := true
+> compile
+$ delete target/out
+> compile
+> checkHit
+$ copy-file changes/A2.scala src/main/scala/A.scala
+> compile
+> checkSemanticdb injar
+> set ThisBuild / semanticdbIncludeInJar := false
 
 # Scala 2 and an options change, as in #9877
 > set ThisBuild / scalaVersion := "2.13.16"
