@@ -3,7 +3,7 @@ package sbt.util
 import java.io.{ ByteArrayInputStream, IOException, InputStream }
 import java.nio.charset.StandardCharsets
 import java.nio.file.{ AccessDeniedException, Files, LinkOption, NoSuchFileException, Path, Paths }
-import java.nio.file.attribute.{ PosixFileAttributeView, PosixFilePermission }
+import java.nio.file.attribute.{ BasicFileAttributes, PosixFileAttributeView, PosixFilePermission }
 import java.util.Optional
 import java.util.zip.ZipFile
 import java.util.concurrent.{ CyclicBarrier, ExecutorService, Executors, TimeUnit }
@@ -366,6 +366,81 @@ object ActionCacheTest extends BasicTestSuite:
         cache.syncBlobs(refs, outputDirectory)
         assert(IO.read(dir / "a.txt") == "contents A", "diverged file was not restored")
         assert(!(dir / "stray.txt").exists, "stray file was not removed")
+
+  test("Disk cache restores a SemanticDB file as a writable copy"):
+    withDiskCache: cache =>
+      IO.withTemporaryDirectory: tempDir =>
+        val in = StringVirtualFile1(s"$tempDir/A.scala.semanticdb", "foo")
+        val ref = cache.putBlobs(in :: Nil).head
+        val out = cache.syncBlobs(ref :: Nil, tempDir.toPath()).head
+        assert(!Files.isSymbolicLink(out), s"$out was symlinked into the CAS")
+        assert(Files.isWritable(out))
+        val key = Files.readAttributes(out, classOf[BasicFileAttributes]).fileKey()
+        cache.syncBlobs(ref :: Nil, tempDir.toPath())
+        assert(Files.readAttributes(out, classOf[BasicFileAttributes]).fileKey() == key)
+
+  test("Disk cache replaces a SemanticDB link with a writable copy"):
+    withDiskCache: cache =>
+      IO.withTemporaryDirectory: tempDir =>
+        val in = StringVirtualFile1(s"$tempDir/A.scala.semanticdb", "foo")
+        val ref = cache.putBlobs(in :: Nil).head
+        val out = (tempDir / "A.scala.semanticdb").toPath()
+        if trySymlink(out, cache.toCasFile(Digest(ref))) then
+          cache.syncBlobs(ref :: Nil, tempDir.toPath())
+          assert(!Files.isSymbolicLink(out), s"$out is still a link into the CAS")
+          assert(Files.isWritable(out))
+          assert(Files.readString(out, StandardCharsets.UTF_8) == "foo")
+
+  test("Disk cache extracts SemanticDB files from a dirzip as writable copies"):
+    withDiskCache: cache =>
+      IO.withTemporaryDirectory: tempDir =>
+        val outputDirectory = tempDir.toPath()
+        val dir = tempDir / "classes"
+        IO.write(dir / "A.class", "class A")
+        IO.write(dir / "META-INF" / "semanticdb" / "A.scala.semanticdb", "semanticdb A")
+        val zipVf = ActionCache.packageDirectory(
+          binaryFileConverter.toVirtualFile(dir.toPath()),
+          binaryFileConverter,
+          outputDirectory,
+        )
+        val refs = cache.putBlobs(Seq(zipVf))
+        IO.delete(dir)
+        cache.syncBlobs(refs, outputDirectory)
+        val semanticdb = (dir / "META-INF" / "semanticdb" / "A.scala.semanticdb").toPath()
+        assertMaterialized(cache, (dir / "A.class").toPath())
+        assert(!Files.isSymbolicLink(semanticdb), s"$semanticdb was symlinked into the CAS")
+        assert(Files.isWritable(semanticdb))
+
+  test("Disk cache replaces a digest-matching SemanticDB link when it re-extracts a dirzip"):
+    withDiskCache: cache =>
+      IO.withTemporaryDirectory: tempDir =>
+        val outputDirectory = tempDir.toPath()
+        val dir = tempDir / "classes"
+        val semanticdb = (dir / "META-INF" / "semanticdb" / "A.scala.semanticdb").toPath()
+        def packageDir(): Seq[HashedVirtualFileRef] =
+          cache.putBlobs(
+            Seq(
+              ActionCache.packageDirectory(
+                binaryFileConverter.toVirtualFile(dir.toPath()),
+                binaryFileConverter,
+                outputDirectory,
+              )
+            )
+          )
+        IO.write(dir / "A.class", "class A")
+        IO.write(semanticdb.toFile(), "semanticdb A")
+        val refs1 = packageDir()
+        IO.write(dir / "A.class", "class A, changed")
+        val refs2 = packageDir()
+        cache.syncBlobs(refs1, outputDirectory)
+        val sameContent = (tempDir / "same-content").toPath()
+        Files.writeString(sameContent, "semanticdb A", StandardCharsets.UTF_8)
+        Files.delete(semanticdb)
+        if trySymlink(semanticdb, sameContent) then
+          cache.syncBlobs(refs2, outputDirectory)
+          assert(IO.read(dir / "A.class") == "class A, changed")
+          assert(!Files.isSymbolicLink(semanticdb), s"$semanticdb is still a link")
+          assert(Files.isWritable(semanticdb))
 
   test("In-memory cache can hold action value"):
     withInMemoryCache(testActionCacheBasic)
